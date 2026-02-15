@@ -60,7 +60,8 @@ assert_contains() {
 }
 
 assert_file_exists() {
-    local path="$1" msg="${2:-file should exist: ${path}}"
+    local path="$1"
+    local msg="${2:-file should exist: ${path}}"
     if [ -e "$path" ]; then
         return
     fi
@@ -70,7 +71,8 @@ assert_file_exists() {
 }
 
 assert_file_not_exists() {
-    local path="$1" msg="${2:-file should not exist: ${path}}"
+    local path="$1"
+    local msg="${2:-file should not exist: ${path}}"
     if [ ! -e "$path" ]; then
         return
     fi

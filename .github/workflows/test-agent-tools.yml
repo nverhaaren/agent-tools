@@ -18,5 +18,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Shellcheck
+        run: shellcheck agent-worktree tests/test-agent-worktree.sh
+
       - name: Run agent-worktree tests
         run: ./tests/test-agent-worktree.sh
