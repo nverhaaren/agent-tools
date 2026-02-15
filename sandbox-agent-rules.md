@@ -71,6 +71,7 @@ Testing is a **priority**. Potentially another agent will assist with testing in
 - Call out any test bypasses with reasoning
 - Call out any invariant relaxations with reasoning
 - Clearly describe what changed and why
+- **Do NOT rebase PR branches after the PR is created** - doing so makes it more difficult to determine which changes were made in response to which feedback
 
 ## Internet Usage Guidelines
 
