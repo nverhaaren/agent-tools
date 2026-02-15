@@ -1,0 +1,25 @@
+name: Test agent-tools
+
+on:
+  push:
+    paths:
+      - 'agent-worktree'
+      - 'tests/**'
+      - '.github/workflows/test-agent-tools.yml'
+  pull_request:
+    paths:
+      - 'agent-worktree'
+      - 'tests/**'
+      - '.github/workflows/test-agent-tools.yml'
+
+jobs:
+  test-agent-worktree:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shellcheck
+        run: shellcheck agent-worktree tests/test-agent-worktree.sh
+
+      - name: Run agent-worktree tests
+        run: ./tests/test-agent-worktree.sh

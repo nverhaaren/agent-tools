@@ -1,0 +1,258 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# agent-worktree: Manage git worktrees for parallel agent work.
+#
+# Usage:
+#   agent-worktree create <task-name> [base-branch] [--instructions "..."]
+#   agent-worktree list
+#   agent-worktree cleanup <task-name> [--remote]
+#   agent-worktree cleanup-all [--remote]
+
+TREES_DIR=".trees"
+BRANCH_PREFIX="agent"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  agent-worktree create <task-name> [base-branch] [--instructions "..."]
+      Create a worktree at .trees/<task-name> on branch agent/<task-name>.
+      base-branch defaults to "main".
+      --instructions generates .claude/CLAUDE.local.md in the worktree.
+
+  agent-worktree list
+      Show active worktrees, their branches, and ahead/behind status.
+
+  agent-worktree cleanup <task-name> [--remote]
+      Remove worktree and delete the local branch (safe delete).
+      --remote also deletes the remote branch.
+
+  agent-worktree cleanup-all [--remote]
+      Remove all worktrees in .trees/ and their local branches.
+      --remote also deletes remote branches.
+EOF
+}
+
+die() {
+    echo "error: $1" >&2
+    exit 1
+}
+
+require_git_repo() {
+    git rev-parse --git-dir > /dev/null 2>&1 \
+        || die "not a git repository"
+}
+
+# Ensure .trees/ is listed in .gitignore.
+ensure_gitignore() {
+    local gitignore=".gitignore"
+    if [ -f "$gitignore" ]; then
+        if grep -qx "\.trees/" "$gitignore" 2>/dev/null; then
+            return
+        fi
+        # Check for the pattern without the trailing slash too
+        if grep -qx "\.trees" "$gitignore" 2>/dev/null; then
+            return
+        fi
+    fi
+    echo ".trees/" >> "$gitignore"
+    echo "Added .trees/ to .gitignore"
+}
+
+cmd_create() {
+    local task_name=""
+    local base_branch="main"
+    local instructions=""
+
+    # Parse arguments
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --instructions)
+                [ $# -ge 2 ] || die "--instructions requires a value"
+                instructions="$2"
+                shift 2
+                ;;
+            -*)
+                die "unknown option: $1"
+                ;;
+            *)
+                if [ -z "$task_name" ]; then
+                    task_name="$1"
+                else
+                    base_branch="$1"
+                fi
+                shift
+                ;;
+        esac
+    done
+
+    [ -n "$task_name" ] || die "create requires a task name"
+
+    local branch="${BRANCH_PREFIX}/${task_name}"
+    local worktree_path="${TREES_DIR}/${task_name}"
+
+    if [ -d "$worktree_path" ]; then
+        die "worktree already exists: $worktree_path"
+    fi
+
+    # Verify the base branch exists
+    git rev-parse --verify "$base_branch" > /dev/null 2>&1 \
+        || die "base branch '${base_branch}' does not exist"
+
+    ensure_gitignore
+    mkdir -p "$TREES_DIR"
+
+    echo "Creating worktree at ${worktree_path} on branch ${branch} (from ${base_branch})..."
+    git worktree add "$worktree_path" -b "$branch" "$base_branch"
+
+    # Generate CLAUDE.local.md if instructions were provided
+    if [ -n "$instructions" ]; then
+        local claude_dir="${worktree_path}/.claude"
+        mkdir -p "$claude_dir"
+        cat > "${claude_dir}/CLAUDE.local.md" <<INSTREOF
+# Task Instructions
+
+$instructions
+INSTREOF
+        echo "Generated ${claude_dir}/CLAUDE.local.md"
+    fi
+
+    echo ""
+    echo "Worktree ready. To start working:"
+    echo "  cd ${worktree_path} && claude"
+}
+
+cmd_list() {
+    if [ ! -d "$TREES_DIR" ]; then
+        echo "No worktrees found (${TREES_DIR}/ does not exist)."
+        return
+    fi
+
+    # Get the default branch to compare against
+    local default_branch="main"
+    if ! git rev-parse --verify "$default_branch" > /dev/null 2>&1; then
+        default_branch="master"
+        if ! git rev-parse --verify "$default_branch" > /dev/null 2>&1; then
+            default_branch=""
+        fi
+    fi
+
+    local found=0
+    for worktree in "$TREES_DIR"/*/; do
+        [ -d "$worktree" ] || continue
+        found=1
+        local name
+        name=$(basename "$worktree")
+        local branch
+        branch=$(git -C "$worktree" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+        local status=""
+        if [ -n "$default_branch" ]; then
+            local ahead behind
+            ahead=$(git rev-list --count "${default_branch}..${branch}" 2>/dev/null || echo "?")
+            behind=$(git rev-list --count "${branch}..${default_branch}" 2>/dev/null || echo "?")
+            status="[${ahead} ahead, ${behind} behind ${default_branch}]"
+        fi
+
+        printf "  %-20s %-30s %s\n" "$name" "$branch" "$status"
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "No worktrees found in ${TREES_DIR}/."
+    fi
+}
+
+cmd_cleanup() {
+    local task_name=""
+    local delete_remote=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --remote) delete_remote=1; shift ;;
+            -*) die "unknown option: $1" ;;
+            *) task_name="$1"; shift ;;
+        esac
+    done
+
+    [ -n "$task_name" ] || die "cleanup requires a task name"
+
+    local branch="${BRANCH_PREFIX}/${task_name}"
+    local worktree_path="${TREES_DIR}/${task_name}"
+
+    if [ -d "$worktree_path" ]; then
+        echo "Removing worktree ${worktree_path}..."
+        git worktree remove --force "$worktree_path"
+    else
+        echo "Worktree ${worktree_path} does not exist, skipping."
+    fi
+
+    # Safe delete -- fails if branch has unmerged changes
+    if git rev-parse --verify "$branch" > /dev/null 2>&1; then
+        echo "Deleting local branch ${branch}..."
+        git branch -d "$branch"
+    fi
+
+    if [ "$delete_remote" -eq 1 ]; then
+        local remote="origin"
+        if git ls-remote --exit-code "$remote" "refs/heads/${branch}" > /dev/null 2>&1; then
+            echo "Deleting remote branch ${remote}/${branch}..."
+            git push "$remote" --delete "$branch"
+        else
+            echo "Remote branch ${remote}/${branch} does not exist, skipping."
+        fi
+    fi
+
+    echo "Cleanup of '${task_name}' complete."
+}
+
+cmd_cleanup_all() {
+    local delete_remote=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --remote) delete_remote=1; shift ;;
+            -*) die "unknown option: $1" ;;
+            *) die "unexpected argument: $1" ;;
+        esac
+    done
+
+    if [ ! -d "$TREES_DIR" ]; then
+        echo "No worktrees found (${TREES_DIR}/ does not exist)."
+        return
+    fi
+
+    local found=0
+    for worktree in "$TREES_DIR"/*/; do
+        [ -d "$worktree" ] || continue
+        found=1
+        local name
+        name=$(basename "$worktree")
+        if [ "$delete_remote" -eq 1 ]; then
+            cmd_cleanup "$name" --remote
+        else
+            cmd_cleanup "$name"
+        fi
+    done
+
+    if [ "$found" -eq 0 ]; then
+        echo "No worktrees found in ${TREES_DIR}/."
+    fi
+}
+
+# --- Main ---
+
+[ $# -ge 1 ] || { usage; exit 1; }
+
+command="$1"
+shift
+
+require_git_repo
+
+case "$command" in
+    create)      cmd_create "$@" ;;
+    list)        cmd_list "$@" ;;
+    cleanup)     cmd_cleanup "$@" ;;
+    cleanup-all) cmd_cleanup_all "$@" ;;
+    help|--help|-h) usage ;;
+    *)           die "unknown command: $command" ;;
+esac
